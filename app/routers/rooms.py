@@ -29,7 +29,14 @@ def create_room(
     member = RoomMember(room_id=room.id, user_id=current_user.id)
     db.add(member)
     db.commit()
-    return {**room.__dict__, "online_users": 0}
+    return RoomResponse(
+        id=room.id,
+        name=room.name,
+        description=room.description,
+        created_by=room.created_by,
+        created_at=room.created_at,
+        online_users=0
+    )
 
 @router.get("/", response_model=List[RoomResponse])
 def get_rooms(
@@ -38,7 +45,14 @@ def get_rooms(
 ):
     rooms = db.query(Room).all()
     return [
-        {**r.__dict__, "online_users": manager.get_online_users_in_room(r.id)}
+        RoomResponse(
+            id=r.id,
+            name=r.name,
+            description=r.description,
+            created_by=r.created_by,
+            created_at=r.created_at,
+            online_users=manager.get_online_users_in_room(r.id)
+        )
         for r in rooms
     ]
 

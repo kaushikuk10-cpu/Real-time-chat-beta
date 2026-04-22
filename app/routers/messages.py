@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.models.message import Message
 from app.models.user import User
 from app.schemas.message import MessageResponse
@@ -11,6 +11,7 @@ from typing import List
 import json
 
 router = APIRouter(prefix="/api", tags=["Messages"])
+
 
 @router.get("/rooms/{room_id}/messages", response_model=List[MessageResponse])
 def get_messages(
@@ -25,45 +26,54 @@ def get_messages(
     result = []
     for msg in reversed(messages):
         sender = db.query(User).filter(User.id == msg.sender_id).first()
-        result.append({
-            **msg.__dict__,
-            "sender_username": sender.username if sender else "unknown"
-        })
+        result.append(MessageResponse(
+            id=msg.id,
+            content=msg.content,
+            sender_id=msg.sender_id,
+            room_id=msg.room_id,
+            is_read=msg.is_read,
+            created_at=msg.created_at,
+            sender_username=sender.username if sender else "unknown"
+        ))
     return result
+
 
 @router.websocket("/ws/{room_id}/{username}")
 async def websocket_endpoint(
     websocket: WebSocket,
     room_id: int,
-    username: str,
-    db: Session = Depends(get_db)
+    username: str
 ):
-    await manager.connect(websocket, room_id, username)
+    db = SessionLocal()
+    producer = None
 
-    # Update user online status
-    user = db.query(User).filter(User.username == username).first()
-    if user:
+    try:
+        await manager.connect(websocket, room_id, username)
+
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            await websocket.close(code=4001)
+            return
+
         user.is_online = True
         db.commit()
 
-    # Notify others user joined
-    await manager.broadcast_to_room(room_id, {
-        "type": "system",
-        "content": f"{username} joined the room",
-        "username": "System",
-        "room_id": room_id
-    }, exclude=websocket)
+        await manager.broadcast_to_room(room_id, {
+            "type": "system",
+            "content": f"{username} joined the room",
+            "username": "System",
+            "room_id": room_id
+        }, exclude=websocket)
 
-    try:
         producer = await get_kafka_producer()
+
         while True:
             data = await websocket.receive_text()
             message_data = json.loads(data)
 
-            # Save to database
             message = Message(
                 content=message_data["content"],
-                sender_id=user.id if user else 0,
+                sender_id=user.id,
                 room_id=room_id,
                 is_read=False
             )
@@ -71,7 +81,6 @@ async def websocket_endpoint(
             db.commit()
             db.refresh(message)
 
-            # Publish to Kafka
             kafka_message = {
                 "id": message.id,
                 "content": message.content,
@@ -80,18 +89,13 @@ async def websocket_endpoint(
                 "type": "message",
                 "created_at": message.created_at.isoformat()
             }
-            await producer.send(
-                "chat-messages",
-                value=kafka_message
-            )
 
-            # Broadcast to all users in room
+            await producer.send("chat-messages", value=kafka_message)
             await manager.broadcast_to_room(room_id, kafka_message)
-
-        await producer.stop()
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, room_id, username)
+        user = db.query(User).filter(User.username == username).first()
         if user:
             user.is_online = False
             db.commit()
@@ -101,3 +105,10 @@ async def websocket_endpoint(
             "username": "System",
             "room_id": room_id
         })
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        manager.disconnect(websocket, room_id, username)
+    finally:
+        if producer:
+            await producer.stop()
+        db.close()
