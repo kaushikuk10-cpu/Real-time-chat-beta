@@ -2,9 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine
 from app.models import user, room, message
-from app.routers import auth
+from app.routers import auth, rooms, messages
 
-# Create all tables
 user.Base.metadata.create_all(bind=engine)
 room.Base.metadata.create_all(bind=engine)
 message.Base.metadata.create_all(bind=engine)
@@ -24,6 +23,8 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(rooms.router)
+app.include_router(messages.router)
 
 @app.get("/")
 def root():
