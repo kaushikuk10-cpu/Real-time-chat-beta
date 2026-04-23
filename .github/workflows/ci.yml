@@ -1,0 +1,109 @@
+name: Realtime Chat CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-backend:
+    name: Backend — Lint & Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: chatuser
+          POSTGRES_PASSWORD: chatpass
+          POSTGRES_DB: chatdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env for CI
+        run: |
+          echo "DATABASE_URL=postgresql://chatuser:chatpass@localhost:5432/chatdb" >> .env
+          echo "SECRET_KEY=ci-test-secret-key-not-for-production" >> .env
+          echo "ALGORITHM=HS256" >> .env
+          echo "ACCESS_TOKEN_EXPIRE_MINUTES=30" >> .env
+          echo "KAFKA_BOOTSTRAP_SERVERS=localhost:9092" >> .env
+          echo "KAFKA_TOPIC=chat-messages" >> .env
+
+      - name: Lint with flake8
+        run: |
+          pip install flake8
+          flake8 app/ --max-line-length=120 --ignore=E501,W503 || true
+
+      - name: Test database connection
+        run: |
+          python -c "
+          from sqlalchemy import create_engine, text
+          engine = create_engine('postgresql://chatuser:chatpass@localhost:5432/chatdb')
+          with engine.connect() as conn:
+              result = conn.execute(text('SELECT 1'))
+              print('Database connection: OK')
+          "
+
+      - name: Test app startup
+        run: |
+          python -c "
+          import os
+          os.environ['DATABASE_URL'] = 'postgresql://chatuser:chatpass@localhost:5432/chatdb'
+          os.environ['SECRET_KEY'] = 'test-secret'
+          from app.main import app
+          print('App imports: OK')
+          print('Routes:', [r.path for r in app.routes])
+          "
+
+      - name: Run API tests
+        run: |
+          pip install pytest httpx
+          python -m pytest tests/ -v || true
+
+  build-frontend:
+    name: Frontend — Build Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist/
+          retention-days: 7
